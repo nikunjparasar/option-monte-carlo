@@ -2,164 +2,156 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <string.h>
 
-enum OptionType { CALL = 0, PUT = 1 };
-
-// Option Parameters
-struct Option {
-    double S;        // Initial stock price
-    double K;        // Strike price
-    double T;        // Time to maturity
-    double r;        // Risk-free rate
-    double sigma;    // Volatility
-    enum OptionType type; // Option type: CALL or PUT
-};
-
-// Greeks Structure
-struct Greeks {
-    double delta;
-    double gamma;
-    double vega;
-    double theta;
-    double rho;
-};
-
-// Generate a normally distributed random number using Box-Muller transform
-double rand_normal() {
-    double u = (double)rand() / RAND_MAX;
-    double v = (double)rand() / RAND_MAX;
-    return sqrt(-2.0 * log(u)) * cos(2.0 * M_PI * v);
+// Function to generate a random number from a standard normal distribution (Box-Muller Transform)
+float generate_random_normal()
+{
+    float u1 = (float)rand() / RAND_MAX;
+    float u2 = (float)rand() / RAND_MAX;
+    return sqrt(-2.0f * log(u1)) * cos(2.0f * 2.0f * M_PI * u2);
 }
 
-// Perform Monte Carlo simulation
-double monte_carlo_simulation(const struct Option *option, int steps) {
-    double dt = option->T / steps;
-    double drift = (option->r - 0.5 * option->sigma * option->sigma) * dt;
-    double diffusion = option->sigma * sqrt(dt);
-    double logS = log(option->S);
-
-    printf("Simulating price path...\n");
-
-    // Simulate the stock price path
-    for (int i = 0; i < steps; ++i) {
-        double Z = rand_normal(); // Generate a normal random variable
-        logS += drift + diffusion * Z;
+// Function to simulate a single path of the asset price
+float simulate_path(float S, float r, float q, float iv, float dt, int N)
+{
+    for (int i = 0; i < N; ++i)
+    {
+        float dWT = generate_random_normal() * sqrt(dt);
+        S += (r - q) * S * dt + iv * S * dWT;
     }
-
-    double ST = exp(logS); // Final stock price
-    double payoff = 0.0;
-    if (option->type == CALL) {
-        payoff = fmax(ST - option->K, 0.0);
-    } else {
-        payoff = fmax(option->K - ST, 0.0);
-    }
-
-    printf("Final stock price: %.6lf, Payoff: %.6lf\n", ST, payoff);
-
-    return exp(-option->r * option->T) * payoff; // Discounted payoff
+    return S;
 }
 
-// Perform Monte Carlo simulation for option pricing and Greeks calculation
-void monte_carlo_option_cpu(const struct Option *option, int N, int steps, struct Greeks *greeks) {
-    double sum_price = 0.0;
-    double sum_price_up = 0.0;
-    double sum_price_down = 0.0;
-    double sum_price_vega = 0.0;
-    double sum_price_theta = 0.0;
-    double sum_price_rho = 0.0;
+// Function to compute Monte Carlo option price and Greeks on the CPU
+void monte_carlo_option_price_and_greeks(float S, float K, float r, float q, float iv, float t, int N, int simulations)
+{
+    float dt = t / N;
+    float delta_S = 0.01f * S;   // Small change in stock price for Delta and Gamma
+    float delta_iv = 0.01f * iv; // Small change in volatility for Vega
+    float delta_r = 0.01f * r;   // Small change in interest rate for Rho
+    float delta_t = t / 365.0f;  // Small change in time for Theta
 
-    printf("Starting Monte Carlo simulation with %d paths and %d steps per path...\n", N, steps);
+    double payoff_sum = 0.0, delta_sum = 0.0, gamma_sum = 0.0, vega_sum = 0.0, theta_sum = 0.0, rho_sum = 0.0;
 
-    // Original simulation
-    for (int i = 0; i < N; ++i) {
-        if (i % (N / 10) == 0) { // Print progress every 10%
-            printf("Simulating path %d of %d...\n", i + 1, N);
+    // Seed the random number generator
+    srand(time(NULL));
+
+    for (int i = 0; i < simulations; ++i)
+    {
+        // Simulate base case and Greeks paths
+        float S_t = simulate_path(S, r, q, iv, dt, N);
+        float S_up = simulate_path(S + delta_S, r, q, iv, dt, N);
+        float S_down = simulate_path(S - delta_S, r, q, iv, dt, N);
+        float S_vega = simulate_path(S, r, q, iv + delta_iv, dt, N);
+
+        float t_theta = t - delta_t;
+        if (t_theta <= 0.0f)
+            t_theta = 1e-6f;
+        float dt_theta = t_theta / N;
+        float S_theta = simulate_path(S, r, q, iv, dt_theta, N);
+        float S_rho = simulate_path(S, r + delta_r, q, iv, dt, N);
+
+        // Calculate payoffs
+        float C = exp(-r * t) * fmaxf(S_t - K, 0.0f);
+        float C_up = exp(-r * t) * fmaxf(S_up - K, 0.0f);
+        float C_down = exp(-r * t) * fmaxf(S_down - K, 0.0f);
+        float C_vega = exp(-r * t) * fmaxf(S_vega - K, 0.0f);
+        float C_theta = exp(-r * t_theta) * fmaxf(S_theta - K, 0.0f);
+        float C_rho = exp(-(r + delta_r) * t) * fmaxf(S_rho - K, 0.0f);
+
+        // Sum the payoffs for option price and Greeks
+        payoff_sum += C;
+        delta_sum += (C_up - C_down) / (2.0f * delta_S);
+        gamma_sum += (C_up - 2.0f * C + C_down) / (delta_S * delta_S);
+        vega_sum += (C_vega - C) / delta_iv;
+        theta_sum += (C_theta - C) / delta_t;
+        rho_sum += (C_rho - C) / delta_r;
+    }
+
+    // Calculate averages
+    float option_price = payoff_sum / simulations;
+    float delta = delta_sum / simulations;
+    float gamma = gamma_sum / simulations;
+    float vega = (vega_sum / simulations) * 0.01f;
+    float theta = (theta_sum / simulations) * 0.01f;
+    float rho = (rho_sum / simulations) * 0.01f;
+
+    // Print the results
+    printf("Option Price: %.4f\n", option_price);
+    printf("Delta: %.4f\n", delta);
+    printf("Gamma: %.4f\n", gamma);
+    printf("Vega: %.4f\n", vega);
+    printf("Theta: %.4f\n", theta);
+    printf("Rho: %.4f\n", rho);
+}
+
+// Function to get CPU information
+void print_cpu_info()
+{
+#ifdef _WIN32
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    printf("Number of processors: %u\n", sysinfo.dwNumberOfProcessors);
+#elif __linux__
+    char buffer[128];
+    FILE *file = fopen("/proc/cpuinfo", "r");
+    if (file != NULL)
+    {
+        while (fgets(buffer, sizeof(buffer), file) != NULL)
+        {
+            if (strstr(buffer, "model name") != NULL)
+            {
+                printf("%s", buffer);
+                break;
+            }
         }
-        sum_price += monte_carlo_simulation(option, steps);
+        fclose(file);
     }
-    double option_price = sum_price / N;
-
-    printf("Finished main simulation, calculating Greeks...\n");
-
-    // Delta: Simulate for S + epsilon
-    double epsilon = 1e-4;
-    struct Option opt_up = *option;
-    opt_up.S += epsilon;
-    for (int i = 0; i < N; ++i) {
-        sum_price_up += monte_carlo_simulation(&opt_up, steps);
+#elif __APPLE__
+    // macOS-specific command for CPU information
+    char buffer[128];
+    FILE *file = popen("sysctl -n machdep.cpu.brand_string", "r");
+    if (file != NULL)
+    {
+        while (fgets(buffer, sizeof(buffer), file) != NULL)
+        {
+            printf("%s", buffer);
+        }
+        pclose(file);
     }
-    double price_up = sum_price_up / N;
-
-    // Gamma: Simulate for S - epsilon
-    struct Option opt_down = *option;
-    opt_down.S -= epsilon;
-    for (int i = 0; i < N; ++i) {
-        sum_price_down += monte_carlo_simulation(&opt_down, steps);
-    }
-    double price_down = sum_price_down / N;
-
-    // Vega: Simulate for sigma + epsilon
-    struct Option opt_vega = *option;
-    opt_vega.sigma += epsilon;
-    for (int i = 0; i < N; ++i) {
-        sum_price_vega += monte_carlo_simulation(&opt_vega, steps);
-    }
-    double price_vega = sum_price_vega / N;
-
-    // Theta: Simulate for T + epsilon
-    struct Option opt_theta = *option;
-    opt_theta.T += epsilon;
-    for (int i = 0; i < N; ++i) {
-        sum_price_theta += monte_carlo_simulation(&opt_theta, steps);
-    }
-    double price_theta = sum_price_theta / N;
-
-    // Rho: Simulate for r + epsilon
-    struct Option opt_rho = *option;
-    opt_rho.r += epsilon;
-    for (int i = 0; i < N; ++i) {
-        sum_price_rho += monte_carlo_simulation(&opt_rho, steps);
-    }
-    double price_rho = sum_price_rho / N;
-
-    // Calculate Greeks
-    greeks->delta = (price_up - option_price) / epsilon;
-    greeks->gamma = (price_up - 2.0 * option_price + price_down) / (epsilon * epsilon);
-    greeks->vega = (price_vega - option_price) / epsilon;
-    greeks->theta = (price_theta - option_price) / epsilon;
-    greeks->rho = (price_rho - option_price) / epsilon;
-
-    // Output the results
-    printf("Option Price: %.6lf\n", option_price);
-    printf("Greeks:\n");
-    printf("Delta: %.6lf\n", greeks->delta);
-    printf("Gamma: %.6lf\n", greeks->gamma);
-    printf("Vega: %.6lf\n", greeks->vega);
-    printf("Theta: %.6lf\n", greeks->theta);
-    printf("Rho: %.6lf\n", greeks->rho);
+#endif
 }
 
-int main() {
-    srand(time(NULL)); // Seed the random number generator
+int main()
+{
+    // Initialize option parameters
+    float S = 100.0f; // Initial stock price
+    float K = 100.0f; // Strike price
+    float r = 0.05f;  // Risk-free interest rate
+    float q = 0.0f;   // Dividend yield
+    float iv = 0.2f;  // Implied volatility
+    float t = 1.0f;   // Time to expiration in years
 
-    // Define option parameters
-    struct Option option;
-    option.S = 100.0;      // Initial stock price
-    option.K = 100.0;      // Strike price
-    option.T = 1.0;        // Time to maturity (1 year)
-    option.r = 0.05;       // Risk-free rate (5%)
-    option.sigma = 0.2;    // Volatility (20%)
-    option.type = CALL;    // Option type: CALL or PUT
+    int N = 100;              // Number of time steps
+    int simulations = 100000; // Number of Monte Carlo simulations
 
-    // Monte Carlo parameters
-    int N = 1000000;        // Number of simulation paths
-    int steps = 100;        // Number of time steps per path
+    // Print CPU info
+    printf("CPU Information:\n");
+    print_cpu_info();
 
-    // Greeks
-    struct Greeks greeks;
+    // Start timer
+    clock_t start = clock();
 
-    // Run Monte Carlo simulation
-    monte_carlo_option_cpu(&option, N, steps, &greeks);
+    // Call the Monte Carlo pricing function
+    monte_carlo_option_price_and_greeks(S, K, r, q, iv, t, N, simulations);
+
+    // End timer
+    clock_t end = clock();
+    double time_taken = ((double)(end - start)) / CLOCKS_PER_SEC;
+
+    // Print the time taken
+    printf("Time taken: %.4f seconds\n", time_taken);
 
     return 0;
 }
